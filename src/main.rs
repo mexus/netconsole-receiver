@@ -1,7 +1,17 @@
-use std::{fmt, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
-use color_eyre::{eyre::Context, Result};
-use netconsole_handler::{parse, MessageAggregator, MessageProcessor, SingleMessage};
+use color_eyre::{
+    eyre::{ensure, Context},
+    Result,
+};
+use netconsole_handler::{
+    parse, Buffer, Buffers, MessageAggregator, MessageProcessor, SingleMessage,
+};
 use structopt::StructOpt;
 use tokio::net::UdpSocket;
 
@@ -24,13 +34,26 @@ async fn main() -> Result<()> {
     run().await
 }
 
+/// Receives and parses netconsole extended messages.
 #[derive(StructOpt)]
 struct Args {
+    /// UDP address to bind to.
     listen_address: SocketAddr,
+
+    /// IP addresses to receive data from.
+    source_addresses: Vec<IpAddr>,
 }
 
 async fn run() -> Result<()> {
-    let Args { listen_address } = Args::from_args();
+    let Args {
+        listen_address,
+        source_addresses,
+    } = Args::from_args();
+
+    ensure!(
+        !source_addresses.is_empty(),
+        "At least one source address must be provided"
+    );
 
     tracing::info!("Listening at {listen_address} (UDP)");
 
@@ -38,35 +61,65 @@ async fn run() -> Result<()> {
         .await
         .wrap_err_with(|| format!("Unable to bind a UDP socket to {listen_address}"))?;
 
-    // Maximum UDP payload size is slightly smaller, but who cares.
-    let mut buffer = [0u8; 2usize.pow(16)];
+    let mut buffers = Buffers::new(source_addresses.len());
 
-    let mut aggregator = MessageAggregator::new(MessageTracing);
-
-    const TICK_TIMEOUT: Duration = Duration::from_secs(5);
+    let mut processors = source_addresses
+        .into_iter()
+        .map(|source| {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(process_source(source, receiver));
+            (source, sender)
+        })
+        .collect::<HashMap<_, _>>();
 
     loop {
-        let (len, source) =
-            match tokio::time::timeout(TICK_TIMEOUT, socket.recv_from(&mut buffer)).await {
-                Ok(Ok((len, source))) => (len, source),
-                Ok(Err(e)) => {
-                    tracing::error!("Unable to receive data from the socket: {e:#}");
-                    continue;
-                }
-                Err(_timeout) => {
-                    tracing::debug!("No data for quite some time.. ({TICK_TIMEOUT:?})");
-                    aggregator.process_timeouts();
-                    continue;
-                }
-            };
+        let mut buffer = buffers.receive().await;
+        let (len, source) = match socket.recv_from(&mut buffer).await {
+            Ok((len, source)) => (len, source),
+            Err(e) => {
+                tracing::error!("Unable to receive data from the socket: {e:#}");
+                continue;
+            }
+        };
+        buffer.resize(len);
+        let source = source.ip();
+        if let Some(sender) = processors.get(&source) {
+            if sender.send(buffer).await.is_err() {
+                tracing::warn!("Processor for {source} is dead");
+                processors.remove(&source);
+            }
+        } else {
+            // Unknown source.
+            tracing::warn!("Received data from unregistered source {source}");
+        };
+    }
+}
 
-        tracing::debug!("Received {len} bytes from {source}");
-        let data = &buffer[0..len];
-        match parse(data) {
+async fn process_source(source: IpAddr, mut incoming: tokio::sync::mpsc::Receiver<Buffer>) {
+    const TICK_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let mut aggregator = MessageAggregator::new(MessageTracing { source });
+
+    loop {
+        let data = match tokio::time::timeout(TICK_TIMEOUT, incoming.recv()).await {
+            Ok(Some(buffer)) => buffer,
+            Ok(None) => {
+                // Channel closed.
+                break;
+            }
+            Err(_timeout) => {
+                tracing::debug!("No data for quite some time from {source} ({TICK_TIMEOUT:?}) ...");
+                aggregator.process_timeouts();
+                continue;
+            }
+        };
+        match parse(&data) {
             Ok(raw) => {
-                let sequence_number = raw.sequence_number;
+                let sequence_number = raw.sequence_number();
                 if let Err(e) = aggregator.process(raw) {
-                    tracing::warn!("Unable to process a message #{sequence_number}: {e:#}")
+                    tracing::warn!(
+                        "Unable to process a message #{sequence_number} from {source}: {e:#}"
+                    )
                 }
             }
             Err(e) => tracing::warn!("Unable to parse incoming entry: {e:#}"),
@@ -74,7 +127,9 @@ async fn run() -> Result<()> {
     }
 }
 
-struct MessageTracing;
+struct MessageTracing {
+    source: IpAddr,
+}
 
 impl MessageProcessor for MessageTracing {
     fn process_one(
@@ -88,11 +143,13 @@ impl MessageProcessor for MessageTracing {
         }: SingleMessage,
     ) {
         let data = String::from_utf8_lossy(&data);
-        tracing::info!("[{level}] [#{sequence_number}] [{timestamp}]: {data}");
+        let source = &self.source;
+        tracing::info!("[{source}] [{level}] [#{sequence_number}] [{timestamp}]: {data}");
     }
 
     fn process_many(&mut self, messages: Vec<SingleMessage>) {
-        tracing::info!("{}", FormatChunk(&messages));
+        let source = &self.source;
+        tracing::info!("[{source}] {}", FormatChunk(&messages));
     }
 }
 

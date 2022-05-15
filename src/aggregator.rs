@@ -9,12 +9,12 @@ use std::{
 use color_eyre::Result;
 use tokio::time::Instant;
 
-use crate::{Continuation, Fragments, RawParsedEntry, SingleMessage};
+use crate::{Continuation, Fragments, Level, RawParsedEntry, SingleMessage, Timestamp};
 
 /// Per-message fragments aggregator.
 struct FragmentsAggregator {
-    level: u8,
-    timestamp: u64,
+    level: Level,
+    timestamp: Timestamp,
     continuation: Continuation,
     fragments: Fragments,
     begin: Instant,
@@ -25,8 +25,8 @@ type SequenceNumber = u64;
 impl FragmentsAggregator {
     /// Creates a fragment aggregator from the first fragment.
     pub fn new(
-        level: u8,
-        timestamp: u64,
+        level: Level,
+        timestamp: Timestamp,
         continuation: Continuation,
         byte_offset: u32,
         total_bytes: u32,

@@ -7,7 +7,7 @@ use color_eyre::{
     Result,
 };
 
-use crate::{Continuation, FragmentInformation, RawParsedEntry};
+use crate::{Continuation, FragmentInformation, Level, RawParsedEntry, Timestamp};
 
 /// Parses a raw incoming message.
 pub fn parse(message: &[u8]) -> Result<RawParsedEntry<'_>> {
@@ -18,13 +18,15 @@ pub fn parse(message: &[u8]) -> Result<RawParsedEntry<'_>> {
 
     let mut fields = header.split(|c| *c == b',');
 
-    let level: u8 =
-        parse_array(fields.next().wrap_err("Level is missing")?).wrap_err("Can't parse level")?;
+    let level = parse_array(fields.next().wrap_err("Level is missing")?)
+        .map(Level)
+        .wrap_err("Can't parse level")?;
 
     let sequence_number: u64 = parse_array(fields.next().wrap_err("Sequence number is missing")?)
         .wrap_err("Can't parse sequence number")?;
 
-    let timestamp: u64 = parse_array(fields.next().wrap_err("Timestamp is missing")?)
+    let timestamp = parse_array(fields.next().wrap_err("Timestamp is missing")?)
+        .map(Timestamp)
         .wrap_err("Can't parse timestamp")?;
 
     let continuation = fields.next().wrap_err("Continuation flag is missing")?;
