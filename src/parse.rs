@@ -11,7 +11,7 @@ use crate::{Continuation, FragmentInformation, Level, RawParsedEntry, Timestamp}
 
 /// Parses a raw incoming message.
 pub fn parse(message: &[u8]) -> Result<RawParsedEntry<'_>> {
-    // <level>,<sequnum>,<timestamp>,<contflag>;<message text>
+    // <level>,<sequence number>,<timestamp>,<continuation flag>;<message text>
     let semicolon = memchr::memchr(b';', message).wrap_err("No semicolon found")?;
     let header = message.get(..semicolon).expect("It exists!");
     let body = message.get(semicolon + 1..).unwrap_or_default();
