@@ -72,9 +72,28 @@ async fn run() -> Result<()> {
         })
         .collect::<HashMap<_, _>>();
 
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
     loop {
-        let mut buffer = buffers.receive().await;
-        let (len, source) = match socket.recv_from(&mut buffer).await {
+        let mut buffer = tokio::select! {
+            buffer = buffers.receive() => buffer,
+            _ = &mut ctrl_c => {
+                tracing::info!("Terminating");
+                drop(buffers);
+                break;
+            }
+        };
+
+        let result = tokio::select! {
+            result = socket.recv_from(&mut buffer) => result,
+            _ = &mut ctrl_c => {
+                tracing::info!("Terminating");
+                drop(buffers);
+                break;
+            }
+        };
+        let (len, source) = match result {
             Ok((len, source)) => (len, source),
             Err(e) => {
                 tracing::error!("Unable to receive data from the socket: {e:#}");
@@ -93,6 +112,7 @@ async fn run() -> Result<()> {
             tracing::warn!("Received data from unregistered source {source}");
         };
     }
+    Ok(())
 }
 
 async fn process_source(source: IpAddr, mut incoming: tokio::sync::mpsc::Receiver<Buffer>) {
@@ -105,6 +125,7 @@ async fn process_source(source: IpAddr, mut incoming: tokio::sync::mpsc::Receive
             Ok(Some(buffer)) => buffer,
             Ok(None) => {
                 // Channel closed.
+                aggregator.force_flush();
                 break;
             }
             Err(_timeout) => {

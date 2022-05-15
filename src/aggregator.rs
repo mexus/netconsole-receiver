@@ -147,6 +147,8 @@ where
             )
         }
 
+        self.process_timeouts();
+
         Ok(())
     }
 
@@ -203,6 +205,19 @@ where
                 }
             }
         }
+    }
+
+    /// Report everything we've got. Useful for graceful immediate termination.
+    pub fn force_flush(&mut self) {
+        let fragments = std::mem::take(&mut self.fragments);
+        for (sequence_number, fragment) in fragments {
+            let (_received_at, message) = fragment.consume(sequence_number);
+            self.add_message(message);
+        }
+        while let Some((_added, message)) = self.cached.pop_front() {
+            self.add_message(message);
+        }
+        self.flush_continuation();
     }
 
     pub fn process_timeouts(&mut self) {
