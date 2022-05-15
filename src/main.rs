@@ -9,7 +9,7 @@ use color_eyre::{
     eyre::{ensure, Context},
     Result,
 };
-use netconsole_handler::{
+use netconsole_receiver::{
     parse, Buffer, Buffers, MessageAggregator, MessageProcessor, SingleMessage,
 };
 use structopt::StructOpt;
