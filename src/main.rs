@@ -9,6 +9,7 @@ use color_eyre::{
     eyre::{ensure, Context},
     Result,
 };
+use itertools::Itertools;
 use netconsole_receiver::{
     parse, Buffer, Buffers, MessageAggregator, MessageProcessor, SingleMessage,
 };
@@ -42,12 +43,17 @@ struct Args {
 
     /// IP addresses to receive data from.
     source_addresses: Vec<IpAddr>,
+
+    /// Amount of binding attempts when listen address is not available.
+    #[structopt(long, default_value = "10")]
+    bind_attempts: usize,
 }
 
 async fn run() -> Result<()> {
     let Args {
         listen_address,
         source_addresses,
+        bind_attempts,
     } = Args::from_args();
 
     ensure!(
@@ -55,11 +61,38 @@ async fn run() -> Result<()> {
         "At least one source address must be provided"
     );
 
-    tracing::info!("Listening at {listen_address} (UDP)");
+    let mut attempt = 0;
+    let socket = loop {
+        attempt += 1;
+        match UdpSocket::bind(listen_address).await {
+            Ok(socket) => break socket,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                const ATTEMPTS_INTERVAL: Duration = Duration::from_secs(5);
+                tracing::warn!(
+                    "Attempt {attempt}. Binding address {listen_address} is not available."
+                );
+                ensure!(
+                    attempt < bind_attempts,
+                    "Attempts to bind to {listen_address} exceeded"
+                );
+                tracing::info!("Waiting for {ATTEMPTS_INTERVAL:?} before the next attempt.");
+                tokio::time::sleep(ATTEMPTS_INTERVAL).await;
+            }
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::AddrNotAvailable => {}
+                _ => {
+                    return Err(color_eyre::Report::new(e)
+                        .wrap_err(format!("Unable to bind to {listen_address}")))
+                }
+            },
+        }
+    };
 
-    let socket = UdpSocket::bind(listen_address)
-        .await
-        .wrap_err_with(|| format!("Unable to bind a UDP socket to {listen_address}"))?;
+    tracing::info!("Listening at {listen_address} (UDP)");
+    tracing::info!(
+        "Will accept data from the following IPs (UDP): {}",
+        source_addresses.iter().format(",")
+    );
 
     let mut buffers = Buffers::new(source_addresses.len());
 
